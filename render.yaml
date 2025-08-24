@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: my-llm-project-api          # this becomes the subdomain
+    env: docker                       # <- tells Render to use your Dockerfile
+    plan: free                        # free tier is fine to start
+    autoDeploy: true
+    healthCheckPath: /health
+
+    # Optional, but helps Render find your Dockerfile if you ever move it
+    dockerfilePath: ./Dockerfile
+
+    envVars:
+      - key: MODEL_NAME
+        value: Qwen/Qwen2.5-0.5B-Instruct
+      - key: TEMPERATURE
+        value: "0.7"
+      - key: TOP_P
+        value: "0.9"
+      - key: DO_SAMPLE
+        value: "false"
+      - key: MAX_NEW_TOKENS_CAP
+        value: "256"
