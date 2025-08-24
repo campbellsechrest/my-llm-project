@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import os, time, logging
+import os, time, logging, requests
 
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
@@ -17,6 +17,10 @@ MAX_NEW_TOKENS_CAP = int(os.getenv("MAX_NEW_TOKENS_CAP", "256"))
 DEFAULT_DO_SAMPLE = os.getenv("DO_SAMPLE", "false").lower() == "true"
 DEFAULT_TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 DEFAULT_TOP_P = float(os.getenv("TOP_P", "0.9"))
+
+# Hugging Face Inference API (used on Render Free to avoid OOM)
+HF_TOKEN = os.getenv("HF_TOKEN")
+REMOTE_MODEL = MODEL  # reuse same model name remotely
 
 # ------------------ App ------------------
 app = FastAPI()
@@ -38,6 +42,7 @@ _pipe = None
 _tok = None
 
 def get_pipe():
+    """Local pipeline for development. Avoid on tiny cloud instances."""
     global _pipe, _tok
     if _pipe is None:
         _tok = AutoTokenizer.from_pretrained(MODEL)
@@ -52,7 +57,7 @@ def build_prompt(user_text: str) -> str:
     """
     global _tok
     if _tok is None:
-        get_pipe()  # ensure tokenizer loaded
+        get_pipe()  # ensure tokenizer loaded when local
     if hasattr(_tok, "apply_chat_template"):
         messages = [
             {"role": "system", "content": "You are a concise, helpful assistant."},
@@ -64,10 +69,71 @@ def build_prompt(user_text: str) -> str:
     # fallback: plain text with a clear instruction style
     return f"USER: {user_text}\nASSISTANT:"
 
+# ------------------ Remote HF inference ------------------
+def call_hf_inference(
+    prompt_text: str,
+    max_new: int,
+    do_sample: bool,
+    temperature: float,
+    top_p: float,
+    min_new: int,
+) -> str:
+    """
+    Call Hugging Face Inference API with simple retries when the model is loading.
+    """
+    url = f"https://api-inference.huggingface.co/models/{REMOTE_MODEL}"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+    payload = {
+        "inputs": prompt_text,
+        "parameters": {
+            "max_new_tokens": max_new,
+            "temperature": temperature,
+            "top_p": top_p,
+            "do_sample": do_sample,
+            "return_full_text": False,
+            "min_new_tokens": min_new,
+        },
+        "options": {"use_cache": True, "wait_for_model": True},
+    }
+
+    retries = 5
+    backoff = 1.5
+    delay = 1.0
+    last_err = None
+
+    for _ in range(retries):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            # 503 while the model spins up
+            if r.status_code == 503:
+                time.sleep(delay)
+                delay *= backoff
+                continue
+            r.raise_for_status()
+            data = r.json()
+            # Typical HF responses:
+            # [{"generated_text": "..."}] or {"generated_text": "..."}
+            if isinstance(data, list) and data and "generated_text" in data[0]:
+                return (data[0]["generated_text"] or "").strip()
+            if isinstance(data, dict) and "generated_text" in data:
+                return (data["generated_text"] or "").strip()
+            # Some servers return {"error": "..."} on failure
+            if isinstance(data, dict) and "error" in data:
+                raise RuntimeError(data["error"])
+            # Fallback
+            return str(data)
+        except Exception as e:
+            last_err = e
+            time.sleep(delay)
+            delay *= backoff
+
+    raise HTTPException(status_code=502, detail=f"HF inference error: {last_err}")
+
 # ------------------ Health & middleware ------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    mode = "remote" if HF_TOKEN else "local"
+    return {"ok": True, "model": MODEL, "mode": mode}
 
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -105,20 +171,25 @@ def generate(inp: Inp):
     top_p = float(DEFAULT_TOP_P if inp.top_p is None else inp.top_p)
     min_new = max(1, min(int(inp.min_new_tokens or 1), max_new))
 
-    # Build a proper chat-style prompt when possible
     prompt_text = build_prompt(text)
-
     start = time.time()
-    pipe = get_pipe()
-    res = pipe(
-        prompt_text,
-        max_new_tokens=max_new,
-        min_new_tokens=min_new,      # nudge to avoid just "."
-        do_sample=do_sample,
-        temperature=temperature,
-        top_p=top_p,
-        return_full_text=False,      # only continuation
-    )
+
+    if HF_TOKEN:
+        # Remote inference (tiny memory footprint on Render Free)
+        completion = call_hf_inference(prompt_text, max_new, do_sample, temperature, top_p, min_new)
+    else:
+        # Local pipeline (for your laptop; not for 512MB instances)
+        pipe = get_pipe()
+        res = pipe(
+            prompt_text,
+            max_new_tokens=max_new,
+            min_new_tokens=min_new,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
+            return_full_text=False,
+        )
+        completion = (res[0]["generated_text"] or "").strip()
+
     elapsed_ms = int((time.time() - start) * 1000)
-    completion = (res[0]["generated_text"] or "").strip()
     return Out(completion=completion, elapsed_ms=elapsed_ms)
