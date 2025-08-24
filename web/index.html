@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My LLM Demo</title>
+  <style>
+    :root { font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, Arial; }
+    body { margin: 24px; max-width: 900px; }
+    textarea { width: 100%; min-height: 120px; }
+    input[type="number"] { width: 92px; }
+    button { padding: 10px 14px; margin-top: 8px; cursor: pointer; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .out { white-space: pre-wrap; border: 1px solid #ddd; padding: 12px; border-radius: 8px; margin-top: 12px; }
+    .muted { color: #666; font-size: 12px; }
+    .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .history { margin-top: 24px; }
+    .history-item { border: 1px solid #eee; border-radius: 8px; padding: 10px; margin-top: 10px; }
+    .history-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .history-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+    .small-btn { padding: 6px 10px; font-size: 12px; }
+    .sep { height: 1px; background: #eee; margin: 8px 0; }
+    code.inline { background: #f6f6f6; padding: 1px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>LLM Demo</h1>
+  <p class="muted">Backend: <code class="inline">http://127.0.0.1:8000</code></p>
+
+  <label for="prompt"><strong>Prompt</strong></label>
+  <textarea id="prompt" placeholder="Write a haiku about oceans."></textarea>
+
+  <div class="row">
+    <label for="tokens">Max tokens</label>
+    <input id="tokens" type="number" value="80" min="1" max="512" />
+    <button id="run">Generate</button>
+    <button id="copy" class="small-btn" title="Copy output">Copy Output</button>
+    <span id="latency" class="muted"></span>
+  </div>
+
+  <div id="status" class="muted"></div>
+  <div id="output" class="out" aria-live="polite"></div>
+
+  <div class="history">
+    <div class="history-head">
+      <h2 style="margin:0;">History</h2>
+      <div class="actions">
+        <button id="clearHistory" class="small-btn" title="Clear history">Clear</button>
+      </div>
+    </div>
+    <div id="historyList"></div>
+  </div>
+
+  <script>
+    const runBtn = document.getElementById('run');
+    const copyBtn = document.getElementById('copy');
+    const promptEl = document.getElementById('prompt');
+    const tokensEl = document.getElementById('tokens');
+    const statusEl = document.getElementById('status');
+    const latencyEl = document.getElementById('latency');
+    const outEl = document.getElementById('output');
+    const historyList = document.getElementById('historyList');
+    const clearHistoryBtn = document.getElementById('clearHistory');
+
+    const HIST_KEY = 'llm-demo-history-v1';
+    const MAX_HISTORY = 15;
+
+    function loadHistory() {
+      try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); }
+      catch { return []; }
+    }
+    function saveHistory(items) {
+      localStorage.setItem(HIST_KEY, JSON.stringify(items.slice(0, MAX_HISTORY)));
+    }
+    function el(tag, attrs={}, children=[]) {
+      const n = document.createElement(tag);
+      Object.entries(attrs).forEach(([k,v]) => {
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = v;
+        else n.setAttribute(k, v);
+      });
+      children.forEach(c => n.appendChild(c));
+      return n;
+    }
+    function renderHistory() {
+      const items = loadHistory();
+      historyList.innerHTML = '';
+      if (!items.length) {
+        historyList.appendChild(el('p', {class: 'muted', text: 'No history yet.'}));
+        return;
+      }
+      items.forEach((it, idx) => {
+        const title = it.prompt.length > 80 ? it.prompt.slice(0, 80) + '…' : it.prompt;
+        const head = el('div', {class: 'history-head'}, [
+          el('div', {class: 'history-title', text: title}),
+          el('div', {}, [
+            (() => {
+              const b = el('button', {class: 'small-btn', text: 'Copy'});
+              b.onclick = async () => {
+                await navigator.clipboard.writeText(it.completion || '');
+                b.textContent = 'Copied!';
+                setTimeout(() => b.textContent = 'Copy', 900);
+              };
+              return b;
+            })(),
+            (() => {
+              const b = el('button', {class: 'small-btn', text: 'Re-run'});
+              b.onclick = () => {
+                promptEl.value = it.prompt;
+                tokensEl.value = it.max_new_tokens || 80;
+                outEl.textContent = it.completion || '';
+                latencyEl.textContent = it.elapsed_ms ? `~${Math.round(it.elapsed_ms)} ms` : '';
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              };
+              return b;
+            })()
+          ])
+        ]);
+        const meta = el('div', {class: 'muted', text: new Date(it.ts).toLocaleString() + (it.elapsed_ms ? ` • ~${Math.round(it.elapsed_ms)} ms` : '')});
+        const sep = el('div', {class: 'sep'});
+        const body = el('div', {class: 'out', text: it.completion || '(no text)'}); // small preview
+        const card = el('div', {class: 'history-item'}, [head, meta, sep, body]);
+        historyList.appendChild(card);
+      });
+    }
+
+    async function generate() {
+      const prompt = promptEl.value.trim();
+      const max_new_tokens = Math.max(1, Math.min(512, Number(tokensEl.value || 80)));
+      if (!prompt) { outEl.textContent = "Please enter a prompt."; return; }
+
+      runBtn.disabled = true; copyBtn.disabled = true;
+      statusEl.textContent = "Calling API…";
+      latencyEl.textContent = "";
+      outEl.textContent = "";
+
+      try {
+        const t0 = performance.now();
+        const res = await fetch("http://127.0.0.1:8000/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, max_new_tokens })
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        const t1 = performance.now();
+        const elapsed = data.elapsed_ms || (t1 - t0);
+
+        outEl.textContent = data.completion || "(no text)";
+        latencyEl.textContent = `~${Math.round(elapsed)} ms`;
+        statusEl.textContent = "Done.";
+
+        // save to history (newest first)
+        const items = loadHistory();
+        items.unshift({
+          prompt, completion: data.completion || "", elapsed_ms: elapsed,
+          max_new_tokens, ts: Date.now()
+        });
+        saveHistory(items);
+        renderHistory();
+      } catch (e) {
+        statusEl.textContent = "";
+        outEl.textContent = "Error: " + e.message;
+      } finally {
+        runBtn.disabled = false; copyBtn.disabled = false;
+      }
+    }
+
+    runBtn.addEventListener('click', generate);
+
+    copyBtn.addEventListener('click', async () => {
+      if (!outEl.textContent) return;
+      await navigator.clipboard.writeText(outEl.textContent);
+      const old = copyBtn.textContent;
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => (copyBtn.textContent = old), 900);
+    });
+
+    clearHistoryBtn.addEventListener('click', () => {
+      localStorage.removeItem(HIST_KEY);
+      renderHistory();
+    });
+
+    // initial render
+    renderHistory();
+  </script>
+</body>
+</html>
