@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional
 import os, time, logging
 
 from dotenv import load_dotenv
@@ -27,12 +27,10 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3001",
-        "https://my-llm-project.vercel.app"   # ✅ your live frontend
+        "https://my-llm-project.vercel.app",  # live frontend (no trailing slash)
     ],
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
 )
 
 logger = logging.getLogger("uvicorn")
@@ -54,8 +52,7 @@ def build_prompt(user_text: str) -> str:
     """
     global _tok
     if _tok is None:
-        # ensure tokenizer loaded
-        get_pipe()
+        get_pipe()  # ensure tokenizer loaded
     if hasattr(_tok, "apply_chat_template"):
         messages = [
             {"role": "system", "content": "You are a concise, helpful assistant."},
@@ -116,11 +113,11 @@ def generate(inp: Inp):
     res = pipe(
         prompt_text,
         max_new_tokens=max_new,
-        min_new_tokens=min_new,      # ensure we get more than "." 🙂
+        min_new_tokens=min_new,      # nudge to avoid just "."
         do_sample=do_sample,
         temperature=temperature,
         top_p=top_p,
-        return_full_text=False,      # ✅ only the continuation
+        return_full_text=False,      # only continuation
     )
     elapsed_ms = int((time.time() - start) * 1000)
     completion = (res[0]["generated_text"] or "").strip()
