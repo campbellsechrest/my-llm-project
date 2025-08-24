@@ -52,6 +52,8 @@
   </div>
 
   <script>
+ const API_BASE = "https://my-llm-project.onrender.com";
+
     const runBtn = document.getElementById('run');
     const copyBtn = document.getElementById('copy');
     const promptEl = document.getElementById('prompt');
@@ -136,7 +138,7 @@
 
       try {
         const t0 = performance.now();
-        const res = await fetch("http://127.0.0.1:8000/generate", {
+        const res = await fetch(`${API_BASE}/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt, max_new_tokens })

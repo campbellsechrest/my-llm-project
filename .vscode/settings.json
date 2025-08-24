@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "/Users/campbellfulham/my-llm-project/.venv/bin/python",
+  "python.terminal.activateEnvironment": true
+}
