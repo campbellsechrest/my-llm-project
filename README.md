@@ -1,11 +1,11 @@
-# my-llm-project
+# Little Llama Model
 
 Tiny local LLM demo: FastAPI backend + simple HTML frontend.
 
 ## Requirements
 - Python 3.11
 - macOS/Linux/Windows
-- (Optional) GPU not required
+- GPU not required
 
 ## Setup (local)
 
